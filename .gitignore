@@ -1,0 +1,43 @@
+# Qt Creator per-user project settings
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.creator.user
+
+# Qt/qmake build output
+build-*/
+debug/
+release/
+Debug/
+Release/
+Makefile*
+*.o
+*.obj
+*.moc
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+*.rcc
+
+# Executables and platform artifacts
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.idb
+
+# Runtime data and logs
+*.db
+*.db-journal
+*.log
+
+# Editor and OS files
+.vscode/
+.idea/
+.vs/
+*.swp
+*~
+.DS_Store
+Thumbs.db
