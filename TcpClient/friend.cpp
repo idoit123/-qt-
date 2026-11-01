@@ -174,13 +174,13 @@ void Friend::privateChatFriend()
 
 void Friend::groupChat()
 {
-    QString m_pMsg = m_pInputMsgLE->text();
-    if(m_pMsg.size() == 0) return;
-    QString m_sendName = TcpClient::getInstance().getLoginName();//获取信息的发送者
-    PDU *pdu = mkPDU(m_pMsg.size());
+    const QByteArray message = m_pInputMsgLE->text().toUtf8();
+    if (message.isEmpty()) return;
+    const QByteArray sender = TcpClient::getInstance().getLoginName().toUtf8();
+    PDU *pdu = mkPDU(static_cast<uint>(message.size() + 1));
     pdu->uiMsgType = ENUM_MSG_TYPE_GROUP_CHAT_REQUEST;
-    memcpy(pdu->caData,m_sendName.toStdString().c_str(),m_sendName.size());
-    memcpy((char*)pdu->caMsg,m_pMsg.toStdString().c_str(),m_pMsg.size());
+    memcpy(pdu->caData, sender.constData(), static_cast<size_t>(qMin(sender.size(), 31)));
+    memcpy(pdu->caMsg, message.constData(), static_cast<size_t>(message.size()));
     TcpClient::getInstance().getTcpSocket().write((char*)pdu,pdu->uiPDULen);
     free(pdu);
     pdu = NULL;

@@ -1,8 +1,11 @@
-QT       += core gui network
+QT       += core gui network multimedia
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
 CONFIG += c++11
+
+SOURCES += monitor/camerasurface.cpp monitor/videoworker.cpp monitor/monitorwindow.cpp
+HEADERS += monitor/camerasurface.h monitor/videoworker.h monitor/monitorwindow.h
 
 # The following define makes your compiler emit warnings if you use
 # any Qt feature that has been marked deprecated (the exact warnings
@@ -31,6 +34,7 @@ HEADERS += \
     friend.h \
     online.h \
     opewidget.h \
+    pduframer.h \
     privatechat.h \
     protocol.h \
     sharefile.h \
@@ -47,5 +51,4 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
 RESOURCES += \
-    config.qrc \
     config.qrc

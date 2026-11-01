@@ -1,0 +1,67 @@
+Start testing: Sep 22 10:49 CST
+----------------------------------------------------------
+1/3 Testing: epoll_core_test
+1/3 Test: epoll_core_test
+Command: "/tmp/codex-redis-build/epoll_core_test"
+Directory: /tmp/codex-redis-build
+"epoll_core_test" start time: Sep 22 10:49 CST
+Output:
+----------------------------------------------------------
+epoll core tests passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"epoll_core_test" end time: Sep 22 10:49 CST
+"epoll_core_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/3 Testing: epoll_integration_test
+2/3 Test: epoll_integration_test
+Command: "/usr/bin/cmake" "-E" "env" "--unset=CHAT_REDIS_HOST" "/usr/bin/python3.10" "/mnt/f/codex-qt/EpollServer/tests/integration_test.py" "/tmp/codex-redis-build/epoll_chat_server"
+Directory: /tmp/codex-redis-build
+"epoll_integration_test" start time: Sep 22 10:49 CST
+Output:
+----------------------------------------------------------
+friend cache: hits=0 misses=0 errors=0 fills=0 sqlite_queries=1
+epoll chat server: port=39421 db=/tmp/tmpn0dewjrf/chat.db io_threads=4
+20 clients, 1000 private messages and group routing passed
+<end of output>
+Test time =   0.54 sec
+----------------------------------------------------------
+Test Passed.
+"epoll_integration_test" end time: Sep 22 10:49 CST
+"epoll_integration_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/3 Testing: redis_cache_integration_test
+3/3 Test: redis_cache_integration_test
+Command: "/usr/bin/python3.10" "/mnt/f/codex-qt/EpollServer/tests/redis_cache_test.py" "/tmp/codex-redis-build/redis_cache_probe" "/tmp/codex-redis-build/epoll_chat_server" "/usr/bin/redis-server" "/usr/bin/redis-cli"
+Directory: /tmp/codex-redis-build
+"redis_cache_integration_test" start time: Sep 22 10:49 CST
+Output:
+----------------------------------------------------------
+Redis cache unavailable; using SQLite (retry in 1s)
+Redis cache unavailable; using SQLite (retry in 1s)
+friend cache: hits=403 misses=14 errors=2 fills=14 sqlite_queries=18
+friend cache: hits=1 misses=2 errors=0 fills=2 sqlite_queries=2
+friend cache: hits=0 misses=1 errors=0 fills=1 sqlite_queries=1
+epoll chat server: port=59429 db=/tmp/tmp_acwcdm0/chat.db io_threads=4
+20 clients, 1000 private messages and group routing passed
+friend cache: hits=0 misses=2 errors=0 fills=0 sqlite_queries=2
+Redis cache unavailable; using SQLite (retry in 1s)
+friend cache: hits=0 misses=0 errors=1 fills=0 sqlite_queries=2
+friend cache: hits=0 misses=0 errors=0 fills=0 sqlite_queries=1
+friend cache: hits=1 misses=1 errors=0 fills=1 sqlite_queries=1
+Redis cache unavailable; using SQLite (retry in 1s)
+friend cache: hits=0 misses=0 errors=1 fills=0 sqlite_queries=1
+Redis cache: hit/miss, empty list, invalidation, race, corruption, TTL, timeout, recovery, namespace isolation, DB failure, AUTH and chat passed
+<end of output>
+Test time =   5.68 sec
+----------------------------------------------------------
+Test Passed.
+"redis_cache_integration_test" end time: Sep 22 10:49 CST
+"redis_cache_integration_test" time elapsed: 00:00:05
+----------------------------------------------------------
+
+End testing: Sep 22 10:49 CST

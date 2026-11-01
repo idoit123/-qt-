@@ -1,0 +1,26 @@
+name: Linux epoll server
+
+on:
+  push:
+    paths:
+      - "EpollServer/**"
+      - ".github/workflows/linux-epoll.yml"
+  pull_request:
+    paths:
+      - "EpollServer/**"
+      - ".github/workflows/linux-epoll.yml"
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev libhiredis-dev redis-server redis-tools pkg-config libopencv-dev python3-opencv
+      - name: Configure
+        run: cmake -S EpollServer -B build-epoll -DCMAKE_BUILD_TYPE=Release -DCHAT_WITH_VIDEO=ON
+      - name: Build
+        run: cmake --build build-epoll -j2
+      - name: Test
+        run: ctest --test-dir build-epoll --output-on-failure
+

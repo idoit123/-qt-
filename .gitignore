@@ -41,3 +41,7 @@ ui_*.h
 *~
 .DS_Store
 Thumbs.db
+
+# Python test bytecode
+__pycache__/
+*.pyc

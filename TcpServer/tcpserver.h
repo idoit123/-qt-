@@ -25,6 +25,7 @@ public:
 private:
     Ui::TcpServer *ui;
     QString m_strIp; //ip地址
-    quint16 m_usPort; //端口号
+    quint16 m_usPort = 0; //端口号
+    QString m_databasePath; // optional SQLite path
 };
 #endif // TCPSERVER_H

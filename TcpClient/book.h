@@ -1,104 +1,59 @@
 #ifndef BOOK_H
 #define BOOK_H
-
 #include <QWidget>
-#include <QListWidget>//操作文件
+#include <QFile>
+#include <QSaveFile>
+#include <QListWidget>
+#include <QLabel>
+#include <QProgressBar>
 #include <QPushButton>
-#include <QHBoxLayout>
-#include <QVBoxLayout>
-#include <protocol.h>
+#include <QTcpSocket>
 #include <QTimer>
-
-class Book : public QWidget
-{
+#include <memory>
+#include "protocol.h"
+class Book : public QWidget {
     Q_OBJECT
 public:
-    explicit Book(QWidget *parent = nullptr);
-
-    //更新列表
-    void flushFileList(const PDU* pdu);
-//    //获取进入文件夹后的路径
-    QString getEnterDir();
-    void clearEnterDir();
-
-//    //获取下载文件时保存的路径
-    QString getSaveFilePath();
-//    //设置下载文件状态
-    void setDownloadStatus(bool status);
-//    //获取下载文件标志位
-    bool getDownloadStatus();
-
-//    //通过共有函数获取要分享的文件名
-    QString getShareFileName();
-
-    //总文件大小
-    qint64 m_iTotal;
-    //已接收到多少
-    qint64 m_iRecved;
-signals:
-
-    //槽连接
+    explicit Book(QTcpSocket *socket, QWidget *parent = nullptr);
+    void handleResponse(const PDU *pdu);
+    void reset();
+    bool busy() const { return m_busy; }
+    QString currentPath() const { return m_path; }
+    QString getShareFileName() const;
+    void listPath(const QString &path);
+    void makeDirectory(const QString &name);
+    void renameEntry(const QString &name, const QString &newName);
+    void removeEntry(const QString &name, bool directory);
+    void startUpload(const QString &localPath, const QString &remoteName);
+    void startDownload(const QString &remoteName, const QString &localPath);
 public slots:
-    //创建文件夹槽函数
-    void createDir();
-    //刷新文件槽函数
     void flushDir();
-    //删除文件夹槽函数
-    void deleteDir();
-    //重命名文件槽函数
-    void renameFile();
-    //进入文件夹槽函数
-    void enterDir(const QModelIndex &index);
-    //返回上一级槽函数
-    void returnPre();
-    //上传文件槽函数
-    void uploadFile();
-    //上传文件数据槽函数
-    void uploadFileData();
-    //删除文件槽函数
-    void deleteFile();
-    //下载文件槽函数
-    void downloadFile();
-    //分享文件槽函数
-    void shareFile();
-    //移动文件槽函数
-    void moveFile();
-    //选择目标目录槽函数
-    void selectDestDir();
+    void cancelTransfer();
+signals:
+    void operationFinished(const QString &operation, bool ok, const QString &message);
 private:
-    QListWidget *m_pBookListW; //文件名字的列表
-    QPushButton *m_pReturnPB;
-    QPushButton *m_pCreateDirPB;//创建目录按钮
-    QPushButton *m_pDeleteDirPB;//删除目录按钮
-    QPushButton *m_pRenameFilePB;
-    QPushButton *m_pFlushDirPB;//查看文件
-    QPushButton *m_pUploadFilePB;
-    QPushButton *m_pDownloadFilePB;
-    QPushButton *m_pDeleteFilePB;
-    QPushButton *m_pShareFilePB;
-    QPushButton *m_pMoveFilePB;
-    QPushButton *m_pSelectDestDirPB;
-
-    //进入后的路径
-    QString m_strEnterDir;
-    //上传文件时所上传文件的路径
-    QString m_strUploadFilePath;
-
-    //定时器
-    QTimer *m_pTimer;
-
-    //下载文件时要保存的路径
-    QString m_strSaveFilePath;
-    //下载文件表示位
-    bool isDownloadFile;
-
-    //要分享的文件的名
-    QString m_strShareFileName;
-
-    //要移动的文件名
-    QString m_strMoveFileName;
-    QString m_strMoveFilePath;
-    QString m_strDestPath;
+    bool send(const QByteArray &op, const QByteArray &body = {}, const QByteArray &argument = {});
+    void finish(const QString &op, bool ok, const QString &message);
+    void setBusy(bool busy);
+    void nextUpload();
+    void nextDownload();
+    void updateProgress();
+    QString childPath(const QString &name) const;
+    bool validName(const QString &name);
+    void deleteSelected();
+    QTcpSocket *m_socket;
+    QListWidget *m_list;
+    QLabel *m_pathLabel, *m_status;
+    QProgressBar *m_progress;
+    QPushButton *m_cancel;
+    QList<QPushButton *> m_actions;
+    QTimer m_timeout;
+    QTimer m_pump;
+    QFile m_upload;
+    std::unique_ptr<QSaveFile> m_download;
+    QString m_path, m_requestedPath, m_transfer;
+    QByteArray m_pending;
+    qint64 m_total = 0, m_done = 0, m_chunk = 0;
+    bool m_busy = false, m_cancelling = false;
 };
-
-#endif // BOOK_H
+#endif

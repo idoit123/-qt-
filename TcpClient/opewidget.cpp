@@ -1,15 +1,16 @@
 
 #include "opewidget.h"
+#include "tcpclient.h"
 
 OpeWidget::OpeWidget(QWidget *parent)
     : QWidget{parent}
 {
     m_pListW = new QListWidget(this);
     m_pListW->addItem("好友");
-    m_pListW->addItem("图书");
+    m_pListW->addItem("文件管理");
 
     m_pFriend = new Friend;
-    m_pBook = new Book;
+    m_pBook = new Book(&TcpClient::getInstance().getTcpSocket());
 
 //    将m_pFriend与m_pBook放入堆栈窗口
     m_pSW = new QStackedWidget;

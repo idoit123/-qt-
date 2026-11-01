@@ -1,0 +1,111 @@
+{
+  "scope": "single-thread Database::friends, warm cache, loopback Redis; not chat QPS",
+  "environment": {
+    "kernel": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+    "sqlite": "3.37.2",
+    "redis": "Redis server v=6.0.16 sha=00000000:0 malloc=jemalloc-5.2.1 bits=64 build=e91d7986ac6d5bb6",
+    "compiler": "g++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0"
+  },
+  "iterations_per_round": 500,
+  "rounds": 3,
+  "cases": [
+    {
+      "users": 20,
+      "friend_rows": 60,
+      "friends_per_query": 6,
+      "friend_indexes": true,
+      "sqlite": [
+        {
+          "elapsed_ms": 32.2746,
+          "p99_us": 189.401,
+          "sqlite_queries": 500,
+          "cache_hits": 0
+        },
+        {
+          "elapsed_ms": 31.7926,
+          "p99_us": 202.501,
+          "sqlite_queries": 500,
+          "cache_hits": 0
+        },
+        {
+          "elapsed_ms": 29.1992,
+          "p99_us": 163.4,
+          "sqlite_queries": 500,
+          "cache_hits": 0
+        }
+      ],
+      "redis": [
+        {
+          "elapsed_ms": 49.9969,
+          "p99_us": 281.8,
+          "sqlite_queries": 0,
+          "cache_hits": 500
+        },
+        {
+          "elapsed_ms": 53.663,
+          "p99_us": 320.6,
+          "sqlite_queries": 0,
+          "cache_hits": 500
+        },
+        {
+          "elapsed_ms": 54.8721,
+          "p99_us": 324.9,
+          "sqlite_queries": 0,
+          "cache_hits": 500
+        }
+      ],
+      "median_sqlite_ms": 31.7926,
+      "median_redis_ms": 53.663,
+      "elapsed_reduction_percent": -68.79
+    },
+    {
+      "users": 1000,
+      "friend_rows": 50000,
+      "friends_per_query": 100,
+      "friend_indexes": true,
+      "sqlite": [
+        {
+          "elapsed_ms": 57.4441,
+          "p99_us": 238.501,
+          "sqlite_queries": 500,
+          "cache_hits": 0
+        },
+        {
+          "elapsed_ms": 57.3646,
+          "p99_us": 230.4,
+          "sqlite_queries": 500,
+          "cache_hits": 0
+        },
+        {
+          "elapsed_ms": 59.3463,
+          "p99_us": 448.3,
+          "sqlite_queries": 500,
+          "cache_hits": 0
+        }
+      ],
+      "redis": [
+        {
+          "elapsed_ms": 54.5887,
+          "p99_us": 245.801,
+          "sqlite_queries": 0,
+          "cache_hits": 500
+        },
+        {
+          "elapsed_ms": 48.7239,
+          "p99_us": 231.301,
+          "sqlite_queries": 0,
+          "cache_hits": 500
+        },
+        {
+          "elapsed_ms": 59.1496,
+          "p99_us": 273.6,
+          "sqlite_queries": 0,
+          "cache_hits": 500
+        }
+      ],
+      "median_sqlite_ms": 57.4441,
+      "median_redis_ms": 54.5887,
+      "elapsed_reduction_percent": 4.97
+    }
+  ]
+}

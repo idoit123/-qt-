@@ -11,6 +11,7 @@
 #include <QLineEdit>
 #include<QHostAddress>
 #include"opewidget.h"
+#include "pduframer.h"
 QT_BEGIN_NAMESPACE
 namespace Ui { class TcpClient; }
 QT_END_NAMESPACE
@@ -42,12 +43,15 @@ private slots:
     void on_cancel_pb_clicked();
 
 private:
+    void processPdu(PDU *pdu);
+
     Ui::TcpClient *ui;
 
       QString m_strIp; //ip地址
       quint16 m_usPort; //端口号
 
       QTcpSocket m_tcpSocket; //连接服务器，和服务器进行数据交互
+      PduFramer m_framer;
       QString m_strLoginName; //记录本机所登录用户的姓名
 
       //定义路径

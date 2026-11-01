@@ -1,26 +1,42 @@
 #ifndef MYTCPSERVER_H
 #define MYTCPSERVER_H
-#include <QTcpServer>
-#include <qlist.h>
 
-#include"mytcpsocket.h"
+#include <QTcpServer>
+#include <QHash>
+#include <QSet>
+#include <QThread>
+#include "mytcpsocket.h"
+
 class MyTcpServer : public QTcpServer
 {
     Q_OBJECT
 public:
     MyTcpServer();
-    static MyTcpServer &getInstance();//单例模式
-    //重载 只要有客户端连接到服务器，自动调用incomingConnection函数不断收集信号
-     void incomingConnection(qintptr socketDescriptor);
-     //向usrName客户端发送添加好友请求
-     void resend(const char* friName, PDU* pdu);
-     //向所有好友发送群聊信息
-      void resendGroupMsg(QSet<QString> friendSet, PDU* pdu);
+    ~MyTcpServer() override;
+    static MyTcpServer &getInstance();
+    void shutdown();
+    int onlineUserCount() const { return m_users.size(); }
+    void incomingConnection(qintptr socketDescriptor) override;
+    void resend(const char *friName, PDU *pdu);
+    void resendGroupMsg(QSet<QString> friendSet, PDU *pdu);
+
 public slots:
-    //接收MyTcpSocket的下线信号，删除此Socket
-    void deleteSocket(MyTcpSocket* mysocket);
+    void deleteSocket(MyTcpSocket *socket);
+    void registerUser(MyTcpSocket *socket, const QString &userName);
+
+signals:
+    void routeRequested(const QString &userName, const QByteArray &payload);
+
+private slots:
+    void routeToUser(const QString &userName, const QByteArray &payload);
+
 private:
-     QList<MyTcpSocket*> m_tcpSocketList;
+    QHash<MyTcpSocket *, QThread *> m_connections;
+    QSet<QThread *> m_threads;
+    QHash<QString, MyTcpSocket *> m_users;
+    bool m_stopping = false;
 };
+
+Q_DECLARE_METATYPE(MyTcpSocket *)
 
 #endif // MYTCPSERVER_H

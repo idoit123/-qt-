@@ -1,24 +1,206 @@
 #include "mytcpsocket.h"
-#include<QDebug>
-#include"protocol.h"
-#include"opedb.h"
-#include"mytcpserver.h"
+#include <QDebug>
+#include <QThread>
+#include "protocol.h"
+#include "opedb.h"
+#include "mytcpserver.h"
+
+namespace {
+const quint32 kMaxPduLength = 16 * 1024 * 1024;
+const quint32 kMaxChatMessageLength = 64 * 1024;
+const qint64 kMaxPendingOutboundBytes = 1024 * 1024;
+const double kIncomingMessagesPerSecond = 100.0;
+const double kIncomingMessageBurst = 200.0;
+
+bool terminatedField(const char *data)
+{
+    return memchr(data, '\0', 32) != nullptr;
+}
+
+bool carriesAuthenticatedUserInFirstField(quint32 type)
+{
+    return type == ENUM_MSG_TYPE_ADD_FRIEND_REQUEST
+            || type == ENUM_MSG_TYPE_FLUSH_FRIEND_REQUEST
+            || type == ENUM_MSG_TYPE_DELETE_FRIEND_REQUEST
+            || type == ENUM_MSG_TYPE_PRIVATE_CHAT_REQUEST
+            || type == ENUM_MSG_TYPE_GROUP_CHAT_REQUEST;
+}
+
+bool carriesAuthenticatedUserInSecondField(quint32 type)
+{
+    return type == ENUM_MSG_TYPE_ADD_FRIEND_AGREE
+            || type == ENUM_MSG_TYPE_ADD_FRIEND_REFUSE;
+}
+}
+
 MyTcpSocket::MyTcpSocket()
 {
- connect(this,SIGNAL(readyRead()),this,SLOT(recvMsg()));
-  connect(this,SIGNAL(disconnected()),this,SLOT(clientOffline()));//客户端断开连接之后，服务器端会接受到一个disconnected()信号
+    m_rateTokens = kIncomingMessageBurst;
+    m_rateTimer.start();
+    connect(this, &QTcpSocket::readyRead, this, &MyTcpSocket::recvMsg);
+    connect(this, &QTcpSocket::disconnected, this, &MyTcpSocket::clientOffline);
 }
+
+void MyTcpSocket::initialize(qintptr socketDescriptor)
+{
+    if (!setSocketDescriptor(socketDescriptor)) {
+        qWarning() << "Failed to initialize socket" << socketDescriptor << errorString();
+        emit offline(this);
+        return;
+    }
+    qInfo() << "Connection initialized" << socketDescriptor
+            << "thread" << QThread::currentThreadId();
+}
+
+void MyTcpSocket::shutdown()
+{
+    if (state() != QAbstractSocket::UnconnectedState)
+        abort();
+    clientOffline();
+    deleteLater();
+}
+
 void MyTcpSocket::recvMsg()
 {
-    qDebug() << this->bytesAvailable(); // 客户端发送过来的数据大小
+    m_receiveBuffer.append(readAll());
+    while (true) {
+        if (m_receiveBuffer.size() < static_cast<int>(sizeof(quint32))) return;
+        quint32 pduLength = 0;
+        memcpy(&pduLength, m_receiveBuffer.constData(), sizeof(pduLength));
+        if (pduLength < sizeof(PDU) || pduLength > kMaxPduLength) {
+            qWarning() << "Invalid PDU length" << pduLength << "from" << peerAddress();
+            abort();
+            return;
+        }
+        if (m_receiveBuffer.size() < static_cast<int>(pduLength)) return;
+        QByteArray frame = m_receiveBuffer.left(pduLength);
+        m_receiveBuffer.remove(0, pduLength);
+        PDU *pdu = reinterpret_cast<PDU *>(malloc(pduLength));
+        if (!pdu) {
+            qWarning() << "Cannot allocate memory for PDU" << pduLength;
+            abort();
+            return;
+        }
+        memcpy(pdu, frame.constData(), pduLength);
+        if (pdu->uiPDULen != pduLength || pdu->uiMsgLen > pduLength - sizeof(PDU)) {
+            qWarning() << "Invalid PDU fields from" << peerAddress();
+            free(pdu);
+            abort();
+            return;
+        }
+        if (!allowIncomingMessage()) {
+            qWarning() << "Incoming message rate exceeded for" << str_name
+                       << "from" << peerAddress();
+            free(pdu);
+            abort();
+            return;
+        }
+        processPdu(pdu);
+        free(pdu);
+        if (state() == QAbstractSocket::UnconnectedState) return;
+    }
+}
 
-        uint uiPDULen = 0;
-        this->read((char*)&uiPDULen,sizeof(uint));//先接受四个字节的大小的数据
-        uint uiMsgLen = uiPDULen - sizeof(uiPDULen);
-        PDU *pdu = mkPDU(uiMsgLen);
-        this->read((char*)pdu + sizeof(int), uiPDULen - sizeof(uint));
+bool MyTcpSocket::allowIncomingMessage()
+{
+    const qint64 now = m_rateTimer.elapsed();
+    const qint64 elapsed = now - m_lastRateRefillMs;
+    if (elapsed > 0) {
+        m_rateTokens = qMin(kIncomingMessageBurst,
+                            m_rateTokens + elapsed * kIncomingMessagesPerSecond / 1000.0);
+        m_lastRateRefillMs = now;
+    }
+    if (m_rateTokens < 1.0) return false;
+    m_rateTokens -= 1.0;
+    return true;
+}
 
-        switch(pdu->uiMsgType){
+bool MyTcpSocket::queuePayload(const char *data, qint64 size)
+{
+    if (state() != QAbstractSocket::ConnectedState || !data || size <= 0)
+        return false;
+
+    const qint64 pending = bytesToWrite();
+    if (size > kMaxPendingOutboundBytes
+            || pending > kMaxPendingOutboundBytes - size) {
+        qWarning() << "Outbound high-water mark exceeded for" << str_name
+                   << "pending" << pending << "payload" << size;
+        abort();
+        return false;
+    }
+
+    if (write(data, size) != size) {
+        qWarning() << "Failed to queue complete payload for" << str_name;
+        abort();
+        return false;
+    }
+    return true;
+}
+
+void MyTcpSocket::writePayload(const QByteArray &payload)
+{
+    queuePayload(payload.constData(), payload.size());
+}
+
+void MyTcpSocket::processPdu(PDU *pdu)
+{
+    const quint32 type = pdu->uiMsgType;
+    const bool firstField = type == ENUM_MSG_TYPE_REGIST_REQUEST
+            || type == ENUM_MSG_TYPE_LOGIN_REQUEST
+            || type == ENUM_MSG_TYPE_SEARCH_REQUEST
+            || type == ENUM_MSG_TYPE_ADD_FRIEND_REQUEST
+            || type == ENUM_MSG_TYPE_ADD_FRIEND_AGREE
+            || type == ENUM_MSG_TYPE_ADD_FRIEND_REFUSE
+            || type == ENUM_MSG_TYPE_FLUSH_FRIEND_REQUEST
+            || type == ENUM_MSG_TYPE_DELETE_FRIEND_REQUEST
+            || type == ENUM_MSG_TYPE_PRIVATE_CHAT_REQUEST
+            || type == ENUM_MSG_TYPE_GROUP_CHAT_REQUEST;
+    const bool secondField = type == ENUM_MSG_TYPE_REGIST_REQUEST
+            || type == ENUM_MSG_TYPE_LOGIN_REQUEST
+            || type == ENUM_MSG_TYPE_ADD_FRIEND_REQUEST
+            || type == ENUM_MSG_TYPE_ADD_FRIEND_AGREE
+            || type == ENUM_MSG_TYPE_ADD_FRIEND_REFUSE
+            || type == ENUM_MSG_TYPE_DELETE_FRIEND_REQUEST
+            || type == ENUM_MSG_TYPE_PRIVATE_CHAT_REQUEST;
+    if ((firstField && !terminatedField(pdu->caData))
+            || (secondField && !terminatedField(pdu->caData + 32))) {
+        qWarning() << "Unterminated PDU name field from" << peerAddress();
+        abort();
+        return;
+    }
+
+    const bool authenticationRequest = type == ENUM_MSG_TYPE_REGIST_REQUEST
+            || type == ENUM_MSG_TYPE_LOGIN_REQUEST;
+    if ((str_name.isEmpty() && !authenticationRequest)
+            || (!str_name.isEmpty() && authenticationRequest)) {
+        qWarning() << "Rejected request in invalid authentication state" << type
+                   << "from" << peerAddress();
+        abort();
+        return;
+    }
+
+    const char *claimedUser = nullptr;
+    if (carriesAuthenticatedUserInFirstField(type))
+        claimedUser = pdu->caData;
+    else if (carriesAuthenticatedUserInSecondField(type))
+        claimedUser = pdu->caData + 32;
+    if (claimedUser && QString::fromUtf8(claimedUser) != str_name) {
+        qWarning() << "Rejected forged user identity" << claimedUser
+                   << "for authenticated user" << str_name;
+        abort();
+        return;
+    }
+
+    if ((type == ENUM_MSG_TYPE_PRIVATE_CHAT_REQUEST
+            || type == ENUM_MSG_TYPE_GROUP_CHAT_REQUEST)
+            && pdu->uiMsgLen > kMaxChatMessageLength) {
+        qWarning() << "Chat message exceeds limit for" << str_name
+                   << "size" << pdu->uiMsgLen;
+        abort();
+        return;
+    }
+
+    switch (pdu->uiMsgType) {
             //服务器接收到客户端的注册请求
         case ENUM_MSG_TYPE_REGIST_REQUEST:
         {
@@ -26,7 +208,7 @@ void MyTcpSocket::recvMsg()
             char caPwd[32] = {'\0'};
             strncpy(caName,pdu->caData,32);
             strncpy(caPwd,pdu->caData+32,32);
-            qDebug() << caName << caPwd <<pdu->uiMsgType;
+            qInfo() << "Authentication request for" << caName;
             bool ret = OpeDB::getInstance().handelRegist(caName,caPwd);//数据库处理
             //产生回复的PDU
             PDU *respdu = mkPDU(0);
@@ -41,7 +223,7 @@ void MyTcpSocket::recvMsg()
             else{
                 strcpy(respdu->caData,REGIST_FAILED);
             }
-            write((char*)respdu,respdu->uiPDULen); //将消息发送给客户端
+            queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
             free(respdu); //发送完消息后释放空间
             respdu = NULL;
             break;
@@ -53,7 +235,7 @@ void MyTcpSocket::recvMsg()
                     char caPwd[32] = {'\0'};
                     strncpy(caName,pdu->caData,32);
                     strncpy(caPwd,pdu->caData+32,32);
-                    qDebug() << caName << caPwd <<pdu->uiMsgType;
+                    qInfo() << "Authentication request for" << caName;
                     bool ret = OpeDB::getInstance().handelLogin(caName,caPwd);//数据库处理
                     //产生回复的PDU
                     PDU *respdu = mkPDU(0);
@@ -61,11 +243,12 @@ void MyTcpSocket::recvMsg()
                     if(ret){
                         strcpy(respdu->caData,LOGIN_OK);
                         this->str_name = caName;
+                        emit loggedIn(this, this->str_name);
                     }
                     else{
                         strcpy(respdu->caData,LOGIN_FAILED);
                     }
-                    write((char*)respdu,respdu->uiPDULen); //将消息发送给客户端
+                    queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                     free(respdu); //发送完消息后释放空间
                     respdu = NULL;
                     break;
@@ -84,7 +267,7 @@ void MyTcpSocket::recvMsg()
                               ret.at(i).toStdString().c_str(),
                               ret.at(i).size());
                    }
-                   write((char*)respdu,respdu->uiPDULen);//利用Tcp协议发送数据
+                   queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                    free(respdu); //发送完消息后释放空间
                    respdu = NULL;
                    break;
@@ -103,7 +286,7 @@ void MyTcpSocket::recvMsg()
                   }else if(ret == 0){
                       strcpy(respdu->caData,SEARCH_USR_OFFLINE);
                   }
-                  write((char*)respdu,respdu->uiPDULen);//利用Tcp协议发送数据
+                  queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                   free(respdu); //发送完消息后释放空间
                   respdu = NULL;
                   break;
@@ -121,7 +304,7 @@ void MyTcpSocket::recvMsg()
                         PDU *respdu = mkPDU(0);
                         respdu->uiMsgType = ENUM_MSG_TYPE_ADD_FRIEND_RESPOND;
                         strcpy(respdu->caData,EXISTED_FRIEND);
-                        write((char*)respdu,respdu->uiPDULen);//利用Tcp协议发送数据
+                        queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                         free(respdu); //发送完消息后释放空间
                         respdu = NULL;
                     }
@@ -134,7 +317,7 @@ void MyTcpSocket::recvMsg()
                         PDU *respdu = mkPDU(0);
                         respdu->uiMsgType = ENUM_MSG_TYPE_ADD_FRIEND_RESPOND;
                         strcpy(respdu->caData,ADD_FRIEND_OFFLINE);
-                        write((char*)respdu,respdu->uiPDULen);//利用Tcp协议发送数据
+                        queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                         free(respdu); //发送完消息后释放空间
                         respdu = NULL;
                     }
@@ -143,7 +326,7 @@ void MyTcpSocket::recvMsg()
                         PDU *respdu = mkPDU(0);
                         respdu->uiMsgType = ENUM_MSG_TYPE_ADD_FRIEND_RESPOND;
                         strcpy(respdu->caData,ADD_FRIEND_NOEXIST);
-                        write((char*)respdu,respdu->uiPDULen);//利用Tcp协议发送数据
+                        queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                         free(respdu); //发送完消息后释放空间
                         respdu = NULL;
                     }
@@ -151,7 +334,7 @@ void MyTcpSocket::recvMsg()
                         PDU *respdu = mkPDU(0);
                         respdu->uiMsgType = ENUM_MSG_TYPE_ADD_FRIEND_RESPOND;
                         strcpy(respdu->caData,UNKNOW_ERROR);
-                        write((char*)respdu,respdu->uiPDULen);//利用Tcp协议发送数据
+                        queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                         free(respdu); //发送完消息后释放空间
                         respdu = NULL;
                     }
@@ -170,7 +353,7 @@ void MyTcpSocket::recvMsg()
                        QString friname = caFriName;
                        qDebug() << "friname: " << friname;
                        memcpy(respdu->caData,friname.toStdString().c_str(),friname.size());
-                       write((char*)respdu,respdu->uiPDULen);//利用Tcp协议发送数据
+                       queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                        free(respdu); //发送完消息后释放空间
                        respdu = NULL;
                        break;
@@ -187,7 +370,7 @@ void MyTcpSocket::recvMsg()
                        QString friname = caFriName;
                        qDebug() << "friname: " << friname;
                        memcpy(respdu->caData,friname.toStdString().c_str(),friname.size());
-                       write((char*)respdu,respdu->uiPDULen);//利用Tcp协议发送数据
+                       queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                        free(respdu); //发送完消息后释放空间
                        respdu = NULL;
                        break;
@@ -213,7 +396,7 @@ void MyTcpSocket::recvMsg()
                             qDebug() << "ENUM_MSG_TYPE_FLUSH_FRIEND_REQUEST: " << name;
                             i++;
                         }
-                        write((char*)respdu,respdu->uiPDULen);
+                        queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                         free(respdu); //发送完消息后释放空间
                         respdu = NULL;
                         break;
@@ -239,9 +422,10 @@ void MyTcpSocket::recvMsg()
                             //删除好友失败
                             respdu->uiMsgType = ENUM_MSG_TYPE_DELETE_FRIEND_RESPOND_FAILED;
                         }
-                        write((char*)respdu,respdu->uiPDULen);
+                        queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                         free(respdu);
                         respdu = NULL;
+                    break;
                     }
             //服务器收到客户端的私聊请求,将聊天信息转发给chatName客户端
                     case ENUM_MSG_TYPE_PRIVATE_CHAT_REQUEST:
@@ -287,7 +471,7 @@ void MyTcpSocket::recvMsg()
                                PDU *respdu = mkPDU(0);
                                respdu->uiMsgType = ENUM_MSG_TYPE_CREATE_DIR_RESPOND;
                                strcpy(respdu->caData,FILE_NAME_EXIST);
-                               write((char*)respdu,respdu->uiPDULen);
+                               queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                                free(respdu);
                                respdu=NULL;
                            }else{
@@ -297,7 +481,7 @@ void MyTcpSocket::recvMsg()
                                respdu->uiMsgType = ENUM_MSG_TYPE_CREATE_DIR_RESPOND;
                                dir.mkdir(newPath);
                                strcpy(respdu->caData,CREATE_DIR_OK);
-                               write((char*)respdu,respdu->uiPDULen);
+                               queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                                free(respdu);
                                respdu=NULL;
                            }
@@ -307,7 +491,7 @@ void MyTcpSocket::recvMsg()
                            PDU *respdu = mkPDU(0);
                            respdu->uiMsgType = ENUM_MSG_TYPE_CREATE_DIR_RESPOND;
                            strcpy(respdu->caData,DIR_NO_EXIST);
-                           write((char*)respdu,respdu->uiPDULen);
+                           queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                            free(respdu);
                            respdu=NULL;
                        }
@@ -345,7 +529,7 @@ void MyTcpSocket::recvMsg()
                                     << "文件夹：" << fileInfoList[i].isDir()
                                     << "常规文件：" << fileInfoList[i].isFile();
                        }
-                       write((char*)respdu,respdu->uiPDULen);
+                       queuePayload(reinterpret_cast<const char *>(respdu), respdu->uiPDULen);
                        free(respdu);
                        respdu=NULL;
                        delete []curPath;
@@ -696,14 +880,20 @@ void MyTcpSocket::recvMsg()
             break;
         }
 }
-QString MyTcpSocket::getName()
+QString MyTcpSocket::getName() const
 {
     return str_name;
 }
 void MyTcpSocket::clientOffline()
 {
-    OpeDB::getInstance().handleOffline(str_name.toStdString().c_str());
-    emit offline(this);//发送下线信号 this指针保存的就是MyTcpSocket地址
+    if (m_offlineHandled) return;
+    m_offlineHandled = true;
+    qInfo() << "Connection closed" << str_name << "thread" << QThread::currentThreadId();
+    if (!str_name.isEmpty()) {
+        OpeDB::getInstance().handleOffline(str_name.toUtf8().constData());
+    }
+    OpeDB::getInstance().closeConnectionForCurrentThread();
+    emit offline(this);
 }
 
 void MyTcpSocket::sendFileToClient()

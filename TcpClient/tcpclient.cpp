@@ -1,6 +1,7 @@
 #include "tcpclient.h"
 #include "ui_tcpclient.h"
 #include"protocol.h"
+#include <QNetworkProxy>
 TcpClient::TcpClient(QWidget *parent)
     : QWidget(parent)
     , ui(new Ui::TcpClient)
@@ -10,6 +11,13 @@ TcpClient::TcpClient(QWidget *parent)
     this->loadConfig();
     connect(&m_tcpSocket, SIGNAL(connected()), this,SLOT(showConnect()));//信号的发送者、发送的是什么信号、信号的处理者，怎么处理
     connect(&m_tcpSocket, SIGNAL(readyRead()), this,SLOT(recvMsg())); //只要客户端收到消息，就会产生readyRead()信号
+    connect(&m_tcpSocket, &QTcpSocket::disconnected, this, [this]() {
+        m_framer.clear();
+    });
+    connect(&m_tcpSocket, QOverload<QAbstractSocket::SocketError>::of(&QTcpSocket::error),
+            this, [this](QAbstractSocket::SocketError) {
+        qWarning() << "Server connection error:" << m_tcpSocket.errorString();
+    });
      this->m_tcpSocket.connectToHost(QHostAddress(m_strIp), m_usPort);
 }
 
@@ -46,6 +54,12 @@ void TcpClient::loadConfig()
 
         this->m_strIp = strlist[0];
         this->m_usPort = strlist[1].toUShort();
+        const QString boardIp = qEnvironmentVariable("CHAT_SERVER_IP");
+        QHostAddress boardAddress;
+        if (!boardIp.isEmpty() && boardAddress.setAddress(boardIp)) {
+            this->m_strIp = boardIp;
+            m_tcpSocket.setProxy(QNetworkProxy::NoProxy);
+        }
         qDebug() << "ip:" << this->m_strIp;
         qDebug() << "port:" << this->m_usPort;
     }
@@ -56,19 +70,41 @@ void TcpClient::loadConfig()
 
 void TcpClient::showConnect()
 {
+    qInfo() << "Connected to chat server:" << m_tcpSocket.peerAddress().toString()
+            << m_tcpSocket.peerPort();
     QMessageBox::information(this,"连接服务器","连接服务器成功");
 }
 
 void TcpClient::recvMsg()
 {
-    //qDebug() << m_tcpSocket.bytesAvailable(); // 服务器端发送过来的数据大小
+    m_framer.append(m_tcpSocket.readAll());
+    while (true) {
+        QByteArray frame;
+        QString error;
+        const PduFramer::Result result = m_framer.takeFrame(&frame, &error);
+        if (result == PduFramer::NeedMoreData) return;
+        if (result == PduFramer::InvalidFrame) {
+            qWarning() << "Invalid server response:" << error;
+            m_framer.clear();
+            m_tcpSocket.abort();
+            return;
+        }
 
-     uint uiPDULen = 0;
-     m_tcpSocket.read((char*)&uiPDULen,sizeof(uint));//先接受四个字节的大小的数据
-     uint uiMsgLen = uiPDULen - sizeof(uiPDULen);
-     PDU *pdu = mkPDU(uiMsgLen);
-     m_tcpSocket.read((char*)pdu + sizeof(int), uiPDULen - sizeof(uint));
+        PDU *pdu = static_cast<PDU *>(malloc(static_cast<size_t>(frame.size())));
+        if (!pdu) {
+            qCritical() << "Cannot allocate memory for server response";
+            m_framer.clear();
+            m_tcpSocket.abort();
+            return;
+        }
+        memcpy(pdu, frame.constData(), static_cast<size_t>(frame.size()));
+        processPdu(pdu);
+        free(pdu);
+    }
+}
 
+void TcpClient::processPdu(PDU *pdu)
+{
      switch(pdu->uiMsgType){
          //客户端接收到服务器端发送的注册回复信号
      case ENUM_MSG_TYPE_REGIST_RESPOND:
@@ -91,6 +127,8 @@ void TcpClient::recvMsg()
              qDebug() << m_strCurPath;
              QMessageBox::information(this,"登录",LOGIN_OK);
              OpeWidget::getInstance().show();
+             OpeWidget::getInstance().getBook()->reset();
+             OpeWidget::getInstance().getBook()->flushDir();
              this->hide();
          }
          else{
@@ -233,183 +271,12 @@ void TcpClient::recvMsg()
              OpeWidget::getInstance().getFriend()->showGroupMsg(pdu);
              break;
          }
-         //客户端接受到创建文件响应
-       case ENUM_MSG_TYPE_CREATE_DIR_RESPOND:
-       {
-           if(strcmp(pdu->caData,FILE_NAME_EXIST) == 0){
-               QMessageBox::critical(this,"新建文件夹","文件夹名字重复");
-           }
-           if(strcmp(pdu->caData,DIR_NO_EXIST) == 0){
-               QMessageBox::critical(this,"新建文件夹","路径不存在");
-           }
-           if(strcmp(pdu->caData,CREATE_DIR_OK) == 0){
-               QMessageBox::information(this,"新建文件夹","创建成功");
-           }
-           break;
-       }
-           //客户端接收到刷新文件回复
-       case ENUM_MSG_TYPE_FLUSH_DIR_RESPOND:
-       {
-           OpeWidget::getInstance().getBook()->flushFileList(pdu);
-           QString strEnterDir = OpeWidget::getInstance().getBook()->getEnterDir();
-           if(!strEnterDir.isEmpty()){
-               //更新当前路径
-               m_strCurPath = m_strCurPath + "/" + strEnterDir;
-               qDebug() << "enter dir:" << m_strCurPath;
-           }
-           break;
-       }
-           //客户端接收到删除文件夹回复
-       case ENUM_MSG_TYPE_DELETE_DIR_RESPOND:
-       {
-           qDebug() << "ENUM_MSG_TYPE_DELETE_DIR_RESPOND";
-           if(strcmp(pdu->caData, DELETE_DIR_SUCCESSED) == 0){
-               //删除成功
-               QMessageBox::information(this,"删除文件夹","删除成功");
-           }
-           if(strcmp(pdu->caData, DELETE_DIR_FAILED) == 0){
-               QMessageBox::critical(this,"删除文件夹","删除失败");
-           }
-           break;
-       }
-           //客户端接收到重命名回复
-       case ENUM_MSG_TYPE_RENAME_FILE_RESPOND:
-       {
-           if(strcmp(pdu->caData,RENAME_FILE_FAILED) == 0){
-               //重命名失败
-               QMessageBox::critical(this,"重命名文件",RENAME_FILE_FAILED);
-           }
-           if(strcmp(pdu->caData,RENAME_FILE_SUCCESSED) == 0){
-               //重命名成功
-               QMessageBox::information(this,"重命名文件",RENAME_FILE_SUCCESSED);
-           }
-           break;
-       }
-           //客户端接收到进入文件夹失败的回复
-       case ENUM_MSG_TYPE_ENTER_DIR_RESPOND:
-       {
-           //进入文件失败，清空进入文件夹的名称
-           OpeWidget::getInstance().getBook()->clearEnterDir();
-           QMessageBox::critical(this,"进入文件夹",ENTER_DIR_FAILED);
-           break;
-       }
-           //客户端接收到上传文件回复
-       case ENUM_MSG_TYPE_UPLOAD_FILE_RESPOND:
-       {
-           qDebug() << "ENUM_MSG_TYPE_UPLOAD_FILE_RESPOND:";
-           if(strcmp(pdu->caData,UPLOAD_FILE_FAILED) == 0){
-               //上传失败
-               qDebug() << UPLOAD_FILE_FAILED;
-               QMessageBox::critical(this,"上传文件",UPLOAD_FILE_FAILED);
-           }
-           if(strcmp(pdu->caData,UPLOAD_FILE_SUCCESSED) == 0){
-               //上传成功 上传成功之后应该立即刷新当前目录
-               qDebug() << UPLOAD_FILE_SUCCESSED;
-               QMessageBox::information(this,"上传文件",UPLOAD_FILE_SUCCESSED);
-               OpeWidget::getInstance().getBook()->flushDir();
-           }
-           break;
-       }
-           //客户端接收到删除文件回复
-       case ENUM_MSG_TYPE_DELETE_FILE_RESPOND:
-       {
-           if(strcmp(pdu->caData, DELETE_FILE_SUCCESSED) == 0){
-               //删除成功
-               QMessageBox::information(this,"删除文件","删除成功");
-               OpeWidget::getInstance().getBook()->flushDir();//删除成功之后立即刷新文件夹
-           }
-           if(strcmp(pdu->caData, DELETE_FILE_FAILED) == 0){
-               QMessageBox::critical(this,"删除文件","删除失败");
-           }
-           break;
-       }
-           //客户端接收到下载文件回复
-       case ENUM_MSG_TYPE_DOWNLOAD_FILE_RESPOND:
-       {
-           //从pdu中解析出下载文件的名称，大小
-           char curFileName[32] = {'\0'};
-           //sscanf拆解字符串，对应sprintf，因为是输入？所以要取地址？
-           sscanf(pdu->caData,"%s %lld",curFileName,&(OpeWidget::getInstance().getBook()->m_iTotal));
-           qDebug() << "curFileName:"<<curFileName;
-           qDebug() << "m_iTotal:"<<OpeWidget::getInstance().getBook()->m_iTotal;
-           if(strlen(curFileName) > 0 && OpeWidget::getInstance().getBook()->m_iTotal > 0){//文件有效
-               OpeWidget::getInstance().getBook()->m_iRecved = 0;
-               OpeWidget::getInstance().getBook()->setDownloadStatus(true);
-               m_file.setFileName(OpeWidget::getInstance().getBook()->getSaveFilePath());
-               qDebug() << "OpeWidget::getInstance().getBook()->getSaveFilePath():"<<OpeWidget::getInstance().getBook()->getSaveFilePath();
-               if(!m_file.open(QIODevice::WriteOnly)){
-                   QMessageBox::warning(this,"下载文件","获得下载的文件失败");
-               }
-           }
-           break;
-       }
-           //客户端接收到分享文件回应
-       case ENUM_MSG_TYPE_SHARE_FILE_RESPOND:
-       {
-           char strMsg[32] = {'\0'};
-           strcpy(strMsg,pdu->caData);
-           QMessageBox::information(this,"分享文件",strMsg);
-           break;
-       }
-           //客户端接收到分享文件通知
-       case ENUM_MSG_TYPE_SHARE_FILE_NOTE:
-       {
-           //从pdu中获取文件路径以及发送方
-           char *strPath = new char[pdu->uiMsgLen];
-           memcpy(strPath,pdu->caMsg,pdu->uiMsgLen);
-
-           //从后往前找指定字符
-           char *pos = strrchr(strPath, '/');
-           if(pos != NULL){
-               pos++;
-               QString strNote = QString("%1 shares file %2 with you? Do you accept?").arg(pdu->caData).arg(pos);
-               int ret = QMessageBox::question(this,"分享文件",strNote);
-               if(ret == QMessageBox::Yes){//同意接收
-                   qDebug() << "ENUM_MSG_TYPE_SHARE_FILE_NOTE YES";
-                   //向服务器端发送接收回应 将路径放入caMsg
-                   PDU *respdu = mkPDU(pdu->uiMsgLen);
-                   respdu->uiMsgType = ENUM_MSG_TYPE_SHARE_FILE_NOTE_RESPOND;
-                   memcpy(respdu->caMsg,pdu->caMsg,pdu->uiMsgLen);
-
-                   //放入客户端的姓名
-                   QString strName = TcpClient::getInstance().getLoginName();
-                   qDebug() << (char*)respdu->caMsg;
-                   qDebug() << strName;
-
-                   strcpy(respdu->caData,strName.toStdString().c_str());
-                   m_tcpSocket.write((char*)respdu,respdu->uiPDULen);
-                   free(respdu);
-                   respdu = NULL;
-                   qDebug() << "我运行到了这里";
-               }
-           }
-           delete []strPath;
-           strPath=NULL;
-           //delete []pos;
-           //pos = NULL;
-           break;
-       }
-           //客户端接收到移动文件回应
-       case ENUM_MSG_TYPE_MOVE_FILE_RESPOND:
-       {
-           qDebug() << "ENUM_MSG_TYPE_MOVE_FILE_RESPOND";
-           if(strcmp(pdu->caData,MOVE_FILE_OK) == 0){
-               //重命名成功
-               QMessageBox::information(this,"移动文件",MOVE_FILE_OK);
-           }
-           if(strcmp(pdu->caData,MOVE_FILE_FAILURED) == 0){
-               QMessageBox::critical(this,"移动文件",MOVE_FILE_FAILURED);
-           }
-           if(strcmp(pdu->caData,COMMON_ERR) == 0){
-               QMessageBox::critical(this,"移动文件",COMMON_ERR);
-           }
-       }
+     case ENUM_MSG_TYPE_FILE_RESPOND:
+         OpeWidget::getInstance().getBook()->handleResponse(pdu);
+         break;
      default:
          break;
      }
-         //客户端接收到服务器端发送的登录回复信号
-         free(pdu); //发送完消息后释放空间
-         pdu = NULL;
 }
 
 

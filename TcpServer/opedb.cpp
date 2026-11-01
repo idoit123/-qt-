@@ -1,126 +1,151 @@
 #include "opedb.h"
-#include <QSet>
+
+#include <QCoreApplication>
+#include <QMutexLocker>
 #include <QSqlError>
-OpeDB::OpeDB(QObject *parent) : QObject{parent}
+#include <QSqlQuery>
+#include <QThread>
+#include <QDebug>
+
+OpeDB::OpeDB(QObject *parent) : QObject(parent)
 {
-    m_db = QSqlDatabase::addDatabase("QSQLITE");//采用qsqlite3数据库
 }
 
 OpeDB &OpeDB::getInstance()
 {
     static OpeDB instance;
-    return instance;//返回单例的引用
+    return instance;
+}
+
+void OpeDB::setDatabasePath(const QString &path)
+{
+    m_databasePath = path;
+}
+
+QString OpeDB::connectionNameForCurrentThread() const
+{
+    return QStringLiteral("cloud_%1")
+        .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()), 0, 16);
+}
+
+QSqlDatabase OpeDB::connectionForCurrentThread()
+{
+    const QString name = connectionNameForCurrentThread();
+    QSqlDatabase db = QSqlDatabase::contains(name)
+        ? QSqlDatabase::database(name)
+        : QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
+    if (!db.isOpen()) {
+        const QString path = m_databasePath.isEmpty()
+            ? QCoreApplication::applicationDirPath() + QStringLiteral("/cloud.db")
+            : m_databasePath;
+        db.setDatabaseName(path);
+        if (!db.open()) {
+            qWarning() << "Cannot open database" << path << db.lastError().text();
+        } else {
+            QSqlQuery pragma(db);
+            pragma.exec(QStringLiteral("PRAGMA busy_timeout = 5000"));
+            pragma.exec(QStringLiteral("PRAGMA foreign_keys = ON"));
+        }
+    }
+    return db;
 }
 
 void OpeDB::init()
 {
-    m_db.setHostName("localhost");//连接本地数据库
-    m_db.setDatabaseName("F:\\QtStudy\\TcpServer\\cloud.db");
-    if(m_db.open()){
-        //如果数据库能够打开，查询数据库
-        QSqlQuery query;
-        QSqlQuery clearQuery;
-                clearQuery.exec("update usrInfo set online = 0");
-                qDebug() << "全局在线状态已重置为 0";
-        query.exec("select * from usrInfo");//Qt 内部会自动寻找并绑定当前应用程序中被称为“默认连接”的那个已打开的数据库。
-        while(query.next()){
-            QString data = QString("%1,%2,%3").arg(query.value(0).toString()).arg(query.value(1).toString()).arg(query.value(2).toString());
-            qDebug()<<data;
-        }
+    QMutexLocker locker(&m_writeMutex);
+    QSqlDatabase db = connectionForCurrentThread();
+    if (!db.isOpen()) return;
+    QSqlQuery schema(db);
+    if (!schema.exec(QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS usrInfo ("
+            "id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, "
+            "pwd TEXT NOT NULL, online INTEGER NOT NULL DEFAULT 0)"))) {
+        qWarning() << "Failed to initialize user table" << schema.lastError().text();
+        return;
     }
-    else{
-        QMessageBox::critical(NULL,"打开数据库","打开数据库失败");
+    if (!schema.exec(QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS friend ("
+            "id INTEGER NOT NULL, friendId INTEGER NOT NULL)"))) {
+        qWarning() << "Failed to initialize friend table" << schema.lastError().text();
+        return;
     }
+    QSqlQuery clearQuery(db);
+    if (!clearQuery.exec(QStringLiteral("update usrInfo set online = 0"))) {
+        qWarning() << "Failed to reset online state" << clearQuery.lastError().text();
+    }
+}
+
+void OpeDB::closeConnectionForCurrentThread()
+{
+    const QString name = connectionNameForCurrentThread();
+    if (!QSqlDatabase::contains(name)) return;
+    {
+        QSqlDatabase db = QSqlDatabase::database(name);
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(name);
 }
 
 OpeDB::~OpeDB()
 {
-    m_db.close();
+    closeConnectionForCurrentThread();
 }
 
 bool OpeDB::handelRegist(const char *name, const char *pwd)
 {
-    if(name == NULL || pwd == NULL){
-        qDebug() << "name or pwd is null!";
-        return false;//存在空数据，无法注册
-    }
-    //注意存入的是字符串，要添加单引号
-    QString data = QString("insert into usrInfo(name,pwd) values(\'%1\',\'%2\')").arg(name).arg(pwd);
-    qDebug() << data;
-    QSqlQuery query;
-    return query.exec(data); //执行data语句，返回能否注册
+    QMutexLocker locker(&m_writeMutex);
+    if (!name || !pwd) return false;
+    QSqlQuery query(connectionForCurrentThread());
+    if (!query.prepare(QStringLiteral("INSERT INTO usrInfo(name, pwd) VALUES(:name, :pwd)")))
+        return false;
+    query.bindValue(QStringLiteral(":name"), QString::fromUtf8(name));
+    query.bindValue(QStringLiteral(":pwd"), QString::fromUtf8(pwd));
+    return query.exec();
 }
 
 bool OpeDB::handelLogin(const char *name, const char *pwd)
 {
-    if(name == NULL || pwd == NULL){
-        qDebug() << "name or pwd is null!";
-        return false;//存在空数据，无法注册
-    }
-
-    //拼接查询语句
-    QString data = QString("select * from usrInfo where name = \'%1\' and pwd = \'%2\' and online = 0").arg(name).arg(pwd);
-    qDebug() << data;
-    QSqlQuery query;
-    query.exec(data); //执行data语句
-    if(query.next()){
-        //执行data语句之后获得的数据
-        //将登录状态改为1 已登录
-        data = QString("update usrInfo set online = 1 where name = \'%1\' and pwd = \'%2\'").arg(name).arg(pwd);
-        qDebug() << data;
-        QSqlQuery query1;
-        query1.exec(data); //执行data语句
-        return true;
-    }
-    return false;
+    QMutexLocker locker(&m_writeMutex);
+    if (!name || !pwd) return false;
+    QSqlQuery query(connectionForCurrentThread());
+    if (!query.prepare(QStringLiteral("UPDATE usrInfo SET online = 1 "
+                                      "WHERE name = :name AND pwd = :pwd AND online = 0")))
+        return false;
+    query.bindValue(QStringLiteral(":name"), QString::fromUtf8(name));
+    query.bindValue(QStringLiteral(":pwd"), QString::fromUtf8(pwd));
+    return query.exec() && query.numRowsAffected() == 1;
 }
 
 void OpeDB::handleOffline(const char *name)
 {
-    if(name == NULL){
-        qDebug() << "name is null!";
-        return ;//存在空数据，无法注册
-    }
-
-    QString data = QString("update usrInfo set online = 0 where name = \'%1\'").arg(name);
-    qDebug() << data;
-    QSqlQuery query;
-    query.exec(data); //执行data语句
+    QMutexLocker locker(&m_writeMutex);
+    if (!name) return;
+    QSqlQuery query(connectionForCurrentThread());
+    if (!query.prepare(QStringLiteral("UPDATE usrInfo SET online = 0 WHERE name = :name")))
+        return;
+    query.bindValue(QStringLiteral(":name"), QString::fromUtf8(name));
+    if (!query.exec()) qWarning() << "Failed to clear online state" << query.lastError().text();
 }
 
 QStringList OpeDB::handleAllOnline()
 {
-    QString data = QString("select * from usrInfo where online = 1");
-
-    QSqlQuery query;
-    query.exec(data); //执行data语句
+    QSqlQuery query(connectionForCurrentThread());
+    if (!query.exec(QStringLiteral("SELECT name FROM usrInfo WHERE online = 1")))
+        return {};
     QStringList result;
-    result.clear();
-
-    while(query.next()){
-        result.append(query.value(1).toString());
-    }
-
+    while (query.next()) result.append(query.value(0).toString());
     return result;
 }
 
 int OpeDB::handleSearchUsr(const char *name)
 {
-    if(name == NULL) return -1;
-    QString data = QString("select online from usrInfo where name = \'%1\'").arg(name);
-    QSqlQuery query;
-    query.exec(data); //执行data语句
-    if(query.next()){
-        int ret=query.value(0).toInt();
-        if(ret==1){
-            return 1;   //对方在线
-        }
-        else if(ret==0){
-            return 0;   //对方离线
-        }
-    }
-    //用户不存在，返回-1
-    return -1;
+    if (!name) return -1;
+    QSqlQuery query(connectionForCurrentThread());
+    if (!query.prepare(QStringLiteral("SELECT online FROM usrInfo WHERE name = :name")))
+        return -1;
+    query.bindValue(QStringLiteral(":name"), QString::fromUtf8(name));
+    if (!query.exec() || !query.next()) return -1;
+    return query.value(0).toInt() == 1 ? 1 : 0;
 }
 
 /*
@@ -132,61 +157,46 @@ int OpeDB::handleSearchUsr(const char *name)
  */
 int OpeDB::handleAddFriendRequest(const char *usrName, const char *friName)
 {
-    qDebug() << "handleAddFriendRequest";
-    if(usrName == NULL || friName == NULL){
-        return -1;
-    }
+    if (!usrName || !friName) return -1;
 
-    //首先判断friName是否存在
-    QString data = QString("select * from usrInfo where name = \'%1\'").arg(friName);
-    QSqlQuery query;
-    query.exec(data); //执行data语句
-    if(query.next()){
-        //用户存在
-        //判断双方是否是朋友
-        QString data1 = QString("select * from friend where (id=(select id from usrInfo where name = \'%1\') and friendId=(select id from usrInfo where name = \'%2\')) or (id=(select id from usrInfo where name = \'%3\') and friendId=(select id from usrInfo where name = \'%4\'))").arg(usrName).arg(friName).arg(friName).arg(usrName);
-        QSqlQuery query1;
-        query1.exec(data1); //执行data语句
-        if(query1.next()){
-            //双方是朋友
-            return 0;
-        }
-        else{
-            //双方不是朋友
-            //判断对方是否在线
-            QString data3 = QString("select online from usrInfo where name = \'%1\'").arg(friName);
-            QSqlQuery query3;
-            query3.exec(data3); //执行data语句
-            if(query3.next()){
-                int ret=query3.value(0).toInt();
-                if(ret==1){
-                    return 1;   //对方在线
-                }
-                else if(ret==0){
-                    return 2;   //对方离线
-                }
-            }
-        }
-    }
-    else{
-        //用户不存在
-        qDebug() << "usr no exist";
-        return 3;
-    }
-    return -1;
+    const QSqlDatabase db = connectionForCurrentThread();
+    QSqlQuery user(db);
+    if (!user.prepare(QStringLiteral("SELECT online FROM usrInfo WHERE name = :name")))
+        return -1;
+    user.bindValue(QStringLiteral(":name"), QString::fromUtf8(friName));
+    if (!user.exec()) return -1;
+    if (!user.next()) return 3;
+    const bool online = user.value(0).toInt() == 1;
+
+    QSqlQuery relation(db);
+    if (!relation.prepare(QStringLiteral(
+            "SELECT 1 FROM friend WHERE "
+            "(id = (SELECT id FROM usrInfo WHERE name = :user1) "
+            "AND friendId = (SELECT id FROM usrInfo WHERE name = :friend1)) "
+            "OR (id = (SELECT id FROM usrInfo WHERE name = :friend2) "
+            "AND friendId = (SELECT id FROM usrInfo WHERE name = :user2)) LIMIT 1")))
+        return -1;
+    relation.bindValue(QStringLiteral(":user1"), QString::fromUtf8(usrName));
+    relation.bindValue(QStringLiteral(":friend1"), QString::fromUtf8(friName));
+    relation.bindValue(QStringLiteral(":friend2"), QString::fromUtf8(friName));
+    relation.bindValue(QStringLiteral(":user2"), QString::fromUtf8(usrName));
+    if (!relation.exec()) return -1;
+    return relation.next() ? 0 : (online ? 1 : 2);
 }
 
 bool OpeDB::handleAddFriendAgree(const char *usrName, const char *friName)
 {
-    if(usrName == NULL || friName == NULL){
+    QMutexLocker locker(&m_writeMutex);
+    if (!usrName || !friName) return false;
+    QSqlQuery query(connectionForCurrentThread());
+    if (!query.prepare(QStringLiteral(
+            "INSERT INTO friend(id, friendId) VALUES("
+            "(SELECT id FROM usrInfo WHERE name = :user), "
+            "(SELECT id FROM usrInfo WHERE name = :friend))")))
         return false;
-    }
-
-    //插入好友关系的数据 对方 请求者
-    QString data = QString("insert into friend(id, friendId) values((select id from usrInfo where name=\'%1\'), (select id from usrInfo where name=\'%2\'))").arg(usrName).arg(friName);
-    qDebug()<<data;
-    QSqlQuery query;
-    return query.exec(data);
+    query.bindValue(QStringLiteral(":user"), QString::fromUtf8(usrName));
+    query.bindValue(QStringLiteral(":friend"), QString::fromUtf8(friName));
+    return query.exec();
 }
 
 QSet<QString> OpeDB::handleFlushFriendList(const char *usrName)
@@ -207,7 +217,7 @@ QSet<QString> OpeDB::handleFlushFriendList(const char *usrName)
         "JOIN usrInfo u ON f.id = u.id "
         "WHERE f.friendId = (SELECT id FROM usrInfo WHERE name = :name2)";
 
-    QSqlQuery query;
+    QSqlQuery query(connectionForCurrentThread());
     query.prepare(sql);
     query.bindValue(":name1", usrName);
     query.bindValue(":name2", usrName);
@@ -225,23 +235,19 @@ QSet<QString> OpeDB::handleFlushFriendList(const char *usrName)
 
 bool OpeDB::handleDeleteFriend(const char *usrName, const char *friName)
 {
-    if(usrName == NULL || friName == NULL){
+    QMutexLocker locker(&m_writeMutex);
+    if (!usrName || !friName) return false;
+    QSqlQuery query(connectionForCurrentThread());
+    if (!query.prepare(QStringLiteral(
+            "DELETE FROM friend WHERE "
+            "(id = (SELECT id FROM usrInfo WHERE name = :user1) "
+            "AND friendId = (SELECT id FROM usrInfo WHERE name = :friend1)) "
+            "OR (id = (SELECT id FROM usrInfo WHERE name = :friend2) "
+            "AND friendId = (SELECT id FROM usrInfo WHERE name = :user2))")))
         return false;
-    }
-
-    //判断双方是否是朋友
-    QString data = QString("select * from friend where (id=(select id from usrInfo where name = \'%1\') and friendId=(select id from usrInfo where name = \'%2\')) "
-                           "or (id=(select id from usrInfo where name = \'%3\') and friendId=(select id from usrInfo where name = \'%4\'))")
-                       .arg(usrName).arg(friName).arg(friName).arg(usrName);
-    QSqlQuery query;
-    query.exec(data);
-    if(query.next()){
-        //双方是朋友 删除
-        data = QString("delete from friend where ((id=(select id from usrInfo where name=\'%1\') and friendId=(select id from usrInfo where name=\'%2\')) "
-                               "or (id=(select id from usrInfo where name=\'%3\') and friendId=(select id from usrInfo where name=\'%4\')))")
-                           .arg(usrName).arg(friName).arg(friName).arg(usrName);
-        return query.exec(data);
-    }
-    //双方不是朋友
-    return false;
+    query.bindValue(QStringLiteral(":user1"), QString::fromUtf8(usrName));
+    query.bindValue(QStringLiteral(":friend1"), QString::fromUtf8(friName));
+    query.bindValue(QStringLiteral(":friend2"), QString::fromUtf8(friName));
+    query.bindValue(QStringLiteral(":user2"), QString::fromUtf8(usrName));
+    return query.exec() && query.numRowsAffected() > 0;
 }
